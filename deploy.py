@@ -403,6 +403,12 @@ def main():
         if args.cyrillic_ui:
             title('Compiling Serbian Cyrillic UI')
             run(sys.executable, 'scripts/compile-cyrillic-ui.py')
+        active_war = ROOT / ('build/archive-ui-cyrillic.war' if args.cyrillic_ui else 'build/archive-ui.war')
+    else:
+        current = dict(line.split('=', 1) for line in ENV.read_text().splitlines() if '=' in line)
+        active_war = ROOT / current.get('UI_WAR_PATH', './build/archive-ui.war')
+    run(sys.executable, 'scripts/set-default-ui-language.py', str(active_war))
+    if not ENV.exists():
         title('Credentials and TLS certificates')
         write_initial(host, ip, args.kc_admin, args.pacs_admin_user, args.storage, args.reuse_certs_from,
                       args.cyrillic_ui)

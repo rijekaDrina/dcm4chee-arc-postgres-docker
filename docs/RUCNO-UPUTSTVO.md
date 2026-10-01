@@ -122,7 +122,9 @@ python3 scripts/apply-ldap-config.py
 docker compose restart arc
 ```
 
-`configure-users.py` registruje browser adresu u Keycloak-u, omogućava profil korisnika, dodeljuje `account` uloge `view-profile` i `manage-account`, menja lozinke početnih naloga `root`, `admin`, `user` i proverava OIDC prijavu. Svako novo pokretanje te skripte ponovo menja sve te lozinke. Rezultat je u `secrets/INITIAL_CREDENTIALS.txt` sa dozvolama 600. `apply-ldap-config.py` podešava DICOM TLS, WildFly konzolu i UI birač za English i Srpski (latinica).
+`configure-users.py` registruje browser adresu u Keycloak-u, omogućava profil korisnika, dodeljuje `account` uloge `view-profile` i `manage-account`, menja lozinke početnih naloga `root`, `admin`, `user` i proverava OIDC prijavu. Svako novo pokretanje te skripte ponovo menja sve te lozinke. Rezultat je u `secrets/INITIAL_CREDENTIALS.txt` sa dozvolama 600. `apply-ldap-config.py` podešava DICOM TLS, WildFly konzolu i UI birač za English i Srpski (latinica), a uz `--cyrillic-ui` i za Српски (ћирилица).
+
+Pre podizanja servisa automatski postupak izvršava `python3 scripts/set-default-ui-language.py build/archive-ui.war` (ili ćirilični WAR ako je uključen). Time srpska latinica postaje početni jezik za korisnika bez sačuvanog izbora. Početnim nalozima skripta za korisnike postavlja `locale=sr` samo ako atribut još nije definisan. Promena jezika određenog postojećeg naloga bez promene lozinke radi se komandama, na primer `python3 scripts/set-pacs-language.py isidora sr` ili `python3 scripts/set-pacs-language.py isidora sr-Cyrl`.
 
 ## 6. Proba iz browsera i DICOM klijenta
 

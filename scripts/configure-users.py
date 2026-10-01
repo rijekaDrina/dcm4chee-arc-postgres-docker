@@ -142,6 +142,11 @@ for name, password in passwords.items():
     matches = request(f"/admin/realms/dcm4che/users?username={name}&exact=true", token=token)[1]
     if len(matches) != 1:
         raise RuntimeError(f"Cannot unambiguously find the PACS account {name}.")
+    account_id = matches[0]['id']
+    account = request(f"/admin/realms/dcm4che/users/{account_id}", token=token)[1]
+    if not account.get('attributes', {}).get('locale'):
+        account.setdefault('attributes', {})['locale'] = ['sr']
+        request(f"/admin/realms/dcm4che/users/{account_id}", "PUT", account, token)
     request(f"/admin/realms/dcm4che/users/{matches[0]['id']}/reset-password", "PUT", {
         "type": "password", "value": password, "temporary": False,
     }, token)
