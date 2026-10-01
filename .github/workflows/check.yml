@@ -1,0 +1,15 @@
+name: Static checks
+on:
+  push:
+  pull_request:
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Python syntax
+        run: python3 -m py_compile deploy.py scripts/*.py
+      - name: Check Compose template
+        run: docker compose --env-file .env.example config --quiet
+      - name: Check wizard plan without changing host
+        run: python3 deploy.py --dry-run --yes --host 192.0.2.10 --bind-ip 192.0.2.10

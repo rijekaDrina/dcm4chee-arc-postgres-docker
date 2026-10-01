@@ -1,0 +1,8 @@
+.env
+certs/
+client/
+secrets/
+data/
+build/
+__pycache__/
+*.pyc

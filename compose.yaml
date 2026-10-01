@@ -1,0 +1,198 @@
+name: dcm4chee-postgres
+
+services:
+  ldap:
+    image: dcm4che/slapd-dcm4chee:2.6.13-35.1
+    restart: unless-stopped
+    environment:
+      STORAGE_DIR: /storage/fs1
+    healthcheck:
+      test: ["CMD-SHELL", "ldapsearch -x -H ldap://localhost:389 -b dc=dcm4che,dc=org -s base >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    volumes:
+      - ./data/ldap:/var/lib/openldap/openldap-data:Z
+      - ./data/slapd:/etc/openldap/slapd.d:Z
+      - ./data/storage:/storage:Z
+    expose:
+      - "389"
+    networks: [pacs]
+    mem_limit: 256m
+
+  mariadb:
+    image: mariadb:10.11
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?set in .env}
+      MARIADB_DATABASE: keycloak
+      MARIADB_USER: keycloak
+      MARIADB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set in .env}
+    volumes:
+      - ./data/mariadb:/var/lib/mysql:Z
+    networks: [pacs]
+    mem_limit: ${MARIADB_MEMORY_LIMIT:?set in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -uroot -p$$MARIADB_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  keycloak:
+    image: dcm4che/keycloak:25.0.6
+    restart: unless-stopped
+    depends_on:
+      ldap:
+        condition: service_healthy
+      mariadb:
+        condition: service_healthy
+    environment:
+      KC_HTTPS_PORT: 8843
+      KC_HOSTNAME: https://${PUBLIC_HOST}:8843
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HTTPS_KEY_STORE_FILE: /run/certs/keycloak.p12
+      KC_HTTPS_KEY_STORE_PASSWORD: ${TLS_KEYSTORE_PASSWORD:?set in .env}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER:?set in .env}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set in .env}
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN_USER:?set in .env}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set in .env}
+      KC_DB: mariadb
+      KC_DB_URL_DATABASE: keycloak
+      KC_DB_URL_HOST: mariadb
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set in .env}
+      EXTRA_CACERTS: /run/certs/ca.p12
+      EXTRA_CACERTS_PASSWORD: ${EXTRA_CACERTS_PASSWORD:?set in .env}
+      ARCHIVE_HOST: ${PUBLIC_HOST}
+      KEYCLOAK_WAIT_FOR: "ldap:389 mariadb:3306"
+      JAVA_OPTS_APPEND: -Xms256m -Xmx${KC_HEAP_MB:?set in .env}m
+    ports:
+      - "${PUBLIC_BIND_IP}:8843:8843"
+    volumes:
+      - ./data/keycloak:/opt/keycloak/data:Z
+      - ./certs/keycloak.p12:/run/certs/keycloak.p12:ro,Z
+      - ./certs/ca.p12:/run/certs/ca.p12:ro,Z
+    networks: [pacs]
+    mem_limit: ${KC_MEMORY_LIMIT:?set in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -kfsS https://127.0.0.1:8843/ >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  db:
+    image: dcm4che/postgres-dcm4chee:18.3-35
+    restart: unless-stopped
+    command:
+      - postgres
+      # Starter tuning chosen by deploy.py for this host:
+      # - shared_buffers and effective_cache_size scale with host RAM
+      # - autovacuum thresholds for frequently updated PACS metadata
+      # - veći WAL i checkpoint razmak za masovne C-STORE sekvence
+      # - storage cost estimates are only starting values; measure the disk
+      # - io_method=worker: PostgreSQL 18 async I/O
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:?set in .env}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:?set in .env}
+      - -c
+      - work_mem=${PG_WORK_MEM:?set in .env}
+      - -c
+      - maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:?set in .env}
+      - -c
+      - max_connections=${PG_MAX_CONNECTIONS:?set in .env}
+      - -c
+      - wal_compression=on
+      - -c
+      - max_wal_size=${PG_MAX_WAL_SIZE:?set in .env}
+      - -c
+      - min_wal_size=${PG_MIN_WAL_SIZE:?set in .env}
+      - -c
+      - checkpoint_completion_target=0.95
+      - -c
+      - random_page_cost=${PG_RANDOM_PAGE_COST:?set in .env}
+      - -c
+      - effective_io_concurrency=${PG_EFFECTIVE_IO_CONCURRENCY:?set in .env}
+      - -c
+      - jit=off
+      - -c
+      - default_statistics_target=200
+      - -c
+      - autovacuum_vacuum_scale_factor=0.02
+      - -c
+      - autovacuum_analyze_scale_factor=0.01
+      - -c
+      - autovacuum_max_workers=4
+      - -c
+      - io_method=worker
+      # Upstream image init script targets the pre-PG18 config path.
+      - -c
+      - join_collapse_limit=16
+      - -c
+      - from_collapse_limit=16
+    environment:
+      POSTGRES_DB: pacsdb
+      POSTGRES_USER: pacs
+      POSTGRES_PASSWORD: ${PACS_DB_PASSWORD:?set in .env}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql:Z
+    networks: [pacs]
+    mem_limit: ${PG_MEMORY_LIMIT:?set in .env}
+    shm_size: ${PG_SHM_SIZE:?set in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pacs -d pacsdb -q && psql -U pacs -d pacsdb -tAc \"SELECT 1 FROM information_schema.tables WHERE table_name='study'\" | grep -q 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+
+  arc:
+    image: dcm4che/dcm4chee-arc-psql:5.35.1-secure
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    depends_on:
+      ldap:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    environment:
+      POSTGRES_DB: pacsdb
+      POSTGRES_USER: pacs
+      POSTGRES_PASSWORD: ${PACS_DB_PASSWORD:?set in .env}
+      AUTH_SERVER_URL: https://keycloak:8843
+      UI_AUTH_SERVER_URL: https://${PUBLIC_HOST}:8843
+      WILDFLY_WAIT_FOR: "ldap:389 db:5432 keycloak:8843"
+      WILDFLY_CHOWN: /storage
+      KEYSTORE: /run/certs/arc.p12
+      KEYSTORE_PASSWORD: ${TLS_KEYSTORE_PASSWORD:?set in .env}
+      KEY_PASSWORD: ${TLS_KEYSTORE_PASSWORD:?set in .env}
+      EXTRA_CACERTS: /run/certs/ca.p12
+      EXTRA_CACERTS_PASSWORD: ${EXTRA_CACERTS_PASSWORD:?set in .env}
+      JAVA_OPTS_APPEND: -Xms512m -Xmx${ARC_HEAP_MB:?set in .env}m
+    ports:
+      - "${PUBLIC_BIND_IP}:8443:8443"
+      - "${PUBLIC_BIND_IP}:9993:9993"
+      - "${PUBLIC_BIND_IP}:11112:11112"
+      - "${PUBLIC_BIND_IP}:2762:2762"
+      - "${PUBLIC_BIND_IP}:2575:2575"
+      - "${PUBLIC_BIND_IP}:12575:12575"
+    volumes:
+      - ${UI_WAR_PATH:-./build/archive-ui.war}:/opt/wildfly/standalone/deployments/dcm4chee-arc-ui2-5.35.1-secure.war:ro,Z
+      - ./data/wildfly:/opt/wildfly/standalone:Z
+      - ./data/storage:/storage:Z
+      - ./certs/arc.p12:/run/certs/arc.p12:ro,Z
+      - ./certs/ca.p12:/run/certs/ca.p12:ro,Z
+      - ./certs/ca.crt:/run/certs/ca.crt:ro,Z
+    networks: [pacs]
+    mem_limit: ${ARC_MEMORY_LIMIT:?set in .env}
+
+networks:
+  pacs:
