@@ -43,9 +43,9 @@ The wizard refuses to overwrite an existing `.env`, certificate or data folder. 
 | `keycloak` | `dcm4che/keycloak:25.0.6` | Secure login |
 | `mariadb` | `mariadb:10.11` | Keycloak database |
 
-The archive uses the official PostgreSQL secure image; no custom PACS image is built. The wizard detects host RAM and selects conservative initial PostgreSQL memory, connection and WAL settings. It explicitly sets `join_collapse_limit=16` and `from_collapse_limit=16` because the upstream PostgreSQL 18 image initializer still targets the pre-18 `postgresql.conf` path. It checks the disk's rotational flag to choose initial I/O cost settings. These are starting values and should be reviewed with actual workload measurements. [PostgreSQL memory guidance](https://www.postgresql.org/docs/18/runtime-config-resource.html).
+The archive uses the official PostgreSQL secure image; no custom PACS image is built. The wizard detects host RAM and selects conservative initial PostgreSQL memory, connection and WAL settings. It explicitly sets `join_collapse_limit=16` and `from_collapse_limit=16` because the upstream PostgreSQL 18 image initializer still targets the pre-18 `postgresql.conf` path. It checks the disk's rotational flag to choose initial I/O cost settings; on virtual machines, where hypervisors usually report SSD/SAN disks as rotational, it assumes SSD (pass `--storage hdd` if the datastore really is spinning disks). Container memory limits are sized so the host keeps a reserve: on a 32 GB host all limits add up to about 23 GB. Container logs are capped at 3 x 10 MB per service. These are starting values and should be reviewed with actual workload measurements. [PostgreSQL memory guidance](https://www.postgresql.org/docs/18/runtime-config-resource.html).
 
-Study files use `data/storage/fs1` on the host, mapped to `/storage/fs1` in ARC. Put this project on the intended data disk before deployment. Do not change the storage path in the UI unless you understand the archive's storage configuration.
+Study files use `data/storage/fs1` on the host, mapped to `/storage/fs1` in ARC. Put this project on the intended data disk before deployment. Do not change the storage path in the UI unless you understand the archive's storage configuration. The wizard sets a free-space reserve on `fs1` (`dcmStorageThreshold`, 2% of the disk, at most 50 GB): when it is reached, the archive rejects new objects instead of filling the disk to 100%. If `data/` or `data/storage` is a separate mount, the wizard makes Docker wait for those mounts at boot (`/etc/systemd/system/docker.service.d/dcm4chee-mounts.conf`).
 
 ## After installation
 
@@ -90,6 +90,7 @@ The wizard uses [compose.yaml](compose.yaml) and the scripts under [scripts](scr
 - Many 401 errors or no logout: check the `account` client roles `view-profile` and `manage-account` for the PACS user. `configure-users.py` assigns them to the initial accounts and rotates passwords if run again.
 - No studies found: choose web application service `DCM4CHEE` on the Studies page and submit. An empty new archive should return no studies.
 - Archive does not start: `docker compose logs arc`, then `docker compose exec arc tail -100 /opt/wildfly/standalone/log/server.log`.
+- Studies rejected and storage marked full: free space dropped below `dcmStorageThreshold`; add disk space or archive old studies.
 - PostgreSQL unhealthy: `docker compose logs db`; check disk space and that its memory limit is greater than `shared_buffers`.
 
 [Docker Engine installation](https://docs.docker.com/engine/install/) · [Compose plugin installation](https://docs.docker.com/compose/install/linux/) · [dcm4chee secure archive guide](https://github.com/dcm4che/dcm4chee-arc-light/wiki/Run-secured-archive-services-on-a-single-host)

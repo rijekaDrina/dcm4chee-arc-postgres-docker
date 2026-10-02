@@ -1,7 +1,14 @@
 name: dcm4chee-postgres
 
+x-logging: &bounded-logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   ldap:
+    logging: *bounded-logging
     image: dcm4che/slapd-dcm4chee:2.6.13-35.1
     restart: unless-stopped
     environment:
@@ -15,13 +22,15 @@ services:
     volumes:
       - ./data/ldap:/var/lib/openldap/openldap-data:Z
       - ./data/slapd:/etc/openldap/slapd.d:Z
-      - ./data/storage:/storage:Z
+      - ./data/storage:/storage:z
     expose:
       - "389"
     networks: [pacs]
     mem_limit: 256m
 
   mariadb:
+    logging: *bounded-logging
+    stop_grace_period: 2m
     image: mariadb:10.11
     restart: unless-stopped
     environment:
@@ -41,6 +50,8 @@ services:
       start_period: 20s
 
   keycloak:
+    logging: *bounded-logging
+    stop_grace_period: 1m
     image: dcm4che/keycloak:25.0.6
     restart: unless-stopped
     depends_on:
@@ -73,7 +84,7 @@ services:
     volumes:
       - ./data/keycloak:/opt/keycloak/data:Z
       - ./certs/keycloak.p12:/run/certs/keycloak.p12:ro,Z
-      - ./certs/ca.p12:/run/certs/ca.p12:ro,Z
+      - ./certs/ca.p12:/run/certs/ca.p12:ro,z
     networks: [pacs]
     mem_limit: ${KC_MEMORY_LIMIT:?set in .env}
     healthcheck:
@@ -84,14 +95,16 @@ services:
       start_period: 60s
 
   db:
+    logging: *bounded-logging
+    stop_grace_period: 2m
     image: dcm4che/postgres-dcm4chee:18.3-35
     restart: unless-stopped
     command:
       - postgres
       # Starter tuning chosen by deploy.py for this host:
-      # - shared_buffers and effective_cache_size scale with host RAM
+      # - buffers/cache estimates fit within the selected container memory budget
       # - autovacuum thresholds for frequently updated PACS metadata
-      # - veći WAL i checkpoint razmak za masovne C-STORE sekvence
+      # - larger WAL budget; keep the default five-minute checkpoint timeout
       # - storage cost estimates are only starting values; measure the disk
       # - io_method=worker: PostgreSQL 18 async I/O
       - -c
@@ -111,11 +124,15 @@ services:
       - -c
       - min_wal_size=${PG_MIN_WAL_SIZE:?set in .env}
       - -c
-      - checkpoint_completion_target=0.95
+      - checkpoint_completion_target=0.9
       - -c
       - random_page_cost=${PG_RANDOM_PAGE_COST:?set in .env}
       - -c
       - effective_io_concurrency=${PG_EFFECTIVE_IO_CONCURRENCY:?set in .env}
+      - -c
+      - maintenance_io_concurrency=${PG_EFFECTIVE_IO_CONCURRENCY:?set in .env}
+      - -c
+      - io_workers=${PG_IO_WORKERS:-3}
       - -c
       - jit=off
       - -c
@@ -126,6 +143,8 @@ services:
       - autovacuum_analyze_scale_factor=0.01
       - -c
       - autovacuum_max_workers=4
+      - -c
+      - autovacuum_work_mem=128MB
       - -c
       - io_method=worker
       # Upstream image init script targets the pre-PG18 config path.
@@ -150,6 +169,8 @@ services:
       start_period: 30s
 
   arc:
+    logging: *bounded-logging
+    stop_grace_period: 2m
     image: dcm4che/dcm4chee-arc-psql:5.35.1-secure
     restart: unless-stopped
     ulimits:
@@ -187,12 +208,18 @@ services:
     volumes:
       - ${UI_WAR_PATH:-./build/archive-ui.war}:/opt/wildfly/standalone/deployments/dcm4chee-arc-ui2-5.35.1-secure.war:ro,Z
       - ./data/wildfly:/opt/wildfly/standalone:Z
-      - ./data/storage:/storage:Z
+      - ./data/storage:/storage:z
       - ./certs/arc.p12:/run/certs/arc.p12:ro,Z
-      - ./certs/ca.p12:/run/certs/ca.p12:ro,Z
+      - ./certs/ca.p12:/run/certs/ca.p12:ro,z
       - ./certs/ca.crt:/run/certs/ca.crt:ro,Z
     networks: [pacs]
     mem_limit: ${ARC_MEMORY_LIMIT:?set in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "code=$$(curl -k -s -o /dev/null -w '%{http_code}' https://127.0.0.1:8443/dcm4chee-arc/ui2); [ \"$$code\" = 200 ] || [ \"$$code\" = 302 ] || [ \"$$code\" = 303 ]"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
 
 networks:
   pacs:

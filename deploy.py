@@ -56,23 +56,25 @@ def memory_values() -> dict[str, str]:
                         if line.startswith('MemTotal:'))) / 1024 / 1024
     if total_gb < 5:
         raise RuntimeError(f'{total_gb:.1f} GiB RAM detected. At least 5 GiB is needed; 8 GiB or more is recommended.')
-    if total_gb < 7:
-        return dict(PG_SHARED_BUFFERS='512MB', PG_EFFECTIVE_CACHE_SIZE='2GB', PG_WORK_MEM='4MB',
+    if total_gb < 9:
+        return dict(PG_SHARED_BUFFERS='512MB', PG_EFFECTIVE_CACHE_SIZE='1GB', PG_WORK_MEM='4MB',
                     PG_MAINTENANCE_WORK_MEM='128MB', PG_MAX_CONNECTIONS='40', PG_MEMORY_LIMIT='1536m',
                     PG_SHM_SIZE='256m', PG_MAX_WAL_SIZE='1GB', PG_MIN_WAL_SIZE='256MB', ARC_HEAP_MB='768', ARC_MEMORY_LIMIT='1280m',
                     KC_HEAP_MB='512', KC_MEMORY_LIMIT='768m', MARIADB_MEMORY_LIMIT='768m')
     if total_gb < 14:
-        return dict(PG_SHARED_BUFFERS='1GB', PG_EFFECTIVE_CACHE_SIZE='3GB', PG_WORK_MEM='4MB',
+        return dict(PG_SHARED_BUFFERS='1GB', PG_EFFECTIVE_CACHE_SIZE='2GB', PG_WORK_MEM='4MB',
                     PG_MAINTENANCE_WORK_MEM='256MB', PG_MAX_CONNECTIONS='60', PG_MEMORY_LIMIT='3g',
                     PG_SHM_SIZE='512m', PG_MAX_WAL_SIZE='2GB', PG_MIN_WAL_SIZE='512MB', ARC_HEAP_MB='1024', ARC_MEMORY_LIMIT='2g',
                     KC_HEAP_MB='512', KC_MEMORY_LIMIT='1g', MARIADB_MEMORY_LIMIT='1g')
     if total_gb < 28:
-        return dict(PG_SHARED_BUFFERS='3GB', PG_EFFECTIVE_CACHE_SIZE='8GB', PG_WORK_MEM='8MB',
+        return dict(PG_SHARED_BUFFERS='2GB', PG_EFFECTIVE_CACHE_SIZE='4GB', PG_WORK_MEM='8MB',
                     PG_MAINTENANCE_WORK_MEM='512MB', PG_MAX_CONNECTIONS='100', PG_MEMORY_LIMIT='6g',
                     PG_SHM_SIZE='1g', PG_MAX_WAL_SIZE='4GB', PG_MIN_WAL_SIZE='1GB', ARC_HEAP_MB='2048', ARC_MEMORY_LIMIT='3g',
                     KC_HEAP_MB='768', KC_MEMORY_LIMIT='1280m', MARIADB_MEMORY_LIMIT='1g')
-    return dict(PG_SHARED_BUFFERS='8GB', PG_EFFECTIVE_CACHE_SIZE='16GB', PG_WORK_MEM='8MB',
-                PG_MAINTENANCE_WORK_MEM='512MB', PG_MAX_CONNECTIONS='100', PG_MEMORY_LIMIT='12g',
+    # Budget buffers and the planner's cache estimate against the container limit,
+    # leaving room for session memory, autovacuum, and filesystem cache.
+    return dict(PG_SHARED_BUFFERS='6GB', PG_EFFECTIVE_CACHE_SIZE='12GB', PG_WORK_MEM='8MB',
+                PG_MAINTENANCE_WORK_MEM='512MB', PG_MAX_CONNECTIONS='100', PG_MEMORY_LIMIT='16g',
                 PG_SHM_SIZE='1g', PG_MAX_WAL_SIZE='8GB', PG_MIN_WAL_SIZE='2GB', ARC_HEAP_MB='3072', ARC_MEMORY_LIMIT='4g',
                 KC_HEAP_MB='1024', KC_MEMORY_LIMIT='1536m', MARIADB_MEMORY_LIMIT='1g')
 
@@ -83,9 +85,17 @@ def storage_values(choice: str) -> dict[str, str]:
         source = run('df', '-P', str(ROOT), capture=True).stdout.splitlines()[-1].split()[0]
         probe = run('lsblk', '-n', '-o', 'ROTA', source, capture=True, check=False)
         choice = 'ssd' if probe.returncode == 0 and probe.stdout.splitlines() and probe.stdout.splitlines()[0].strip() == '0' else 'hdd'
+        if choice == 'hdd' and shutil.which('systemd-detect-virt'):
+            virt = run('systemd-detect-virt', capture=True, check=False).stdout.strip()
+            # Hypervisors (VMware in particular) report virtual disks as rotational even on SSD/SAN storage.
+            if virt and virt != 'none':
+                print(f'Virtual disk on {virt} reports as rotational; assuming SSD/SAN storage. '
+                      'Use --storage hdd if the datastore really is spinning disks.', flush=True)
+                choice = 'ssd'
+    io_workers = str(min(8, max(3, (os.cpu_count() or 4) // 4)))
     if choice == 'ssd':
-        return dict(PG_RANDOM_PAGE_COST='1.1', PG_EFFECTIVE_IO_CONCURRENCY='200')
-    return dict(PG_RANDOM_PAGE_COST='4.0', PG_EFFECTIVE_IO_CONCURRENCY='1')
+        return dict(PG_RANDOM_PAGE_COST='1.1', PG_EFFECTIVE_IO_CONCURRENCY='200', PG_IO_WORKERS=io_workers)
+    return dict(PG_RANDOM_PAGE_COST='4.0', PG_EFFECTIVE_IO_CONCURRENCY='2', PG_IO_WORKERS='3')
 
 def ensure_tools() -> None:
     missing = [name for name in ('docker', 'openssl', 'ip') if not shutil.which(name)]
@@ -132,6 +142,17 @@ def ensure_tools() -> None:
         raise RuntimeError('Unsupported OS for automatic Docker installation. Install Docker Engine and Compose plugin.')
     run('systemctl', 'enable', '--now', 'docker')
     run('docker', 'info', capture=True)
+
+
+def docker_waits_for_data_mounts() -> None:
+    """Never let Docker start the stack on empty mount points after a reboot."""
+    dropin = Path('/etc/systemd/system/docker.service.d/dcm4chee-mounts.conf')
+    text = f'[Unit]\nRequiresMountsFor={ROOT} {ROOT / "data" / "storage"}\n'
+    if dropin.exists() and dropin.read_text() == text:
+        return
+    dropin.parent.mkdir(parents=True, exist_ok=True)
+    dropin.write_text(text)
+    run('systemctl', 'daemon-reload')
 
 
 def check_ports(bind_ip: str) -> None:
@@ -398,13 +419,19 @@ def main():
         raise RuntimeError(f'{host} does not resolve on this server. Set up DNS/hosts or use the host IP.')
     title('Installation plan')
     print(f'Host: {host}; bind IP: {ip}; project: {ROOT}; ports: {PORTS}', flush=True)
-    print(f'RAM profile: {memory_values()}', flush=True)
-    print(f'Storage profile: {storage_values(args.storage)}', flush=True)
+    ram_plan = memory_values()
+    disk_plan = storage_values(args.storage)
+    if ENV.exists():
+        ram_plan = {key: current.get(key, value) for key, value in ram_plan.items()}
+        disk_plan = {key: current.get(key, value) for key, value in disk_plan.items()}
+    print(f'RAM profile: {ram_plan}', flush=True)
+    print(f'Storage profile: {disk_plan}', flush=True)
     if args.dry_run:
         print('Dry run complete. No files or containers were changed.', flush=True)
         return
     title('Prerequisites and images')
     ensure_tools()
+    docker_waits_for_data_mounts()
     if not ENV.exists():
         check_ports(ip)
     if args.images_archive:
@@ -440,12 +467,16 @@ def main():
         title('Configuring accounts, browser callbacks and DICOM TLS')
         run(sys.executable, 'scripts/configure-users.py')
         run(sys.executable, 'scripts/apply-ldap-config.py')
+        run(sys.executable, 'scripts/set-storage-threshold.py', check=False)
         run('docker', 'compose', 'restart', 'arc')
         wait_arc()
         marker.write_text('Initial account and TLS setup completed.\n')
         marker.chmod(0o600)
     else:
         print('Accounts already configured; passwords left unchanged.', flush=True)
+        if run(sys.executable, 'scripts/set-storage-threshold.py', check=False).returncode == 3:
+            run('docker', 'compose', 'restart', 'arc')
+            wait_arc()
     title('Final checks')
     verify_https(host, 8843)
     verify_https(host, 8443)
