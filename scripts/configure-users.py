@@ -134,24 +134,24 @@ if extra_admin not in ("root", "admin", "user"):
 # Keycloak JS loadUserProfile() needs these account roles or the UI hides the
 # user menu and stops attaching bearer tokens.
 account_clients = request("/admin/realms/dcm4che/clients?clientId=account", token=token)[1]
-account_id = account_clients[0]["id"]
-account_roles = request(f"/admin/realms/dcm4che/clients/{account_id}/roles", token=token)[1]
+account_client_id = account_clients[0]["id"]
+account_roles = request(f"/admin/realms/dcm4che/clients/{account_client_id}/roles", token=token)[1]
 profile_roles = [role for role in account_roles if role["name"] in ("manage-account", "view-profile")]
 
 for name, password in passwords.items():
     matches = request(f"/admin/realms/dcm4che/users?username={name}&exact=true", token=token)[1]
     if len(matches) != 1:
         raise RuntimeError(f"Cannot unambiguously find the PACS account {name}.")
-    account_id = matches[0]['id']
-    account = request(f"/admin/realms/dcm4che/users/{account_id}", token=token)[1]
+    user_id = matches[0]['id']
+    account = request(f"/admin/realms/dcm4che/users/{user_id}", token=token)[1]
     if not account.get('attributes', {}).get('locale'):
         account.setdefault('attributes', {})['locale'] = ['sr']
-        request(f"/admin/realms/dcm4che/users/{account_id}", "PUT", account, token)
+        request(f"/admin/realms/dcm4che/users/{user_id}", "PUT", account, token)
     request(f"/admin/realms/dcm4che/users/{matches[0]['id']}/reset-password", "PUT", {
         "type": "password", "value": password, "temporary": False,
     }, token)
     # enforce the account profile roles for every built-in account
-    request(f"/admin/realms/dcm4che/users/{matches[0]['id']}/role-mappings/clients/{account_id}",
+    request(f"/admin/realms/dcm4che/users/{user_id}/role-mappings/clients/{account_client_id}",
             "POST", profile_roles, token)
     # rotate the LDAP-side password too (Keycloak caches credentials)
     subprocess.run([

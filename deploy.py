@@ -101,16 +101,17 @@ def ensure_tools() -> None:
     print('Missing:', ', '.join(missing), flush=True)
     if os.geteuid():
         raise RuntimeError('Run sudo python3 deploy.py so the wizard can install missing system packages.')
-    release = Path('/etc/os-release').read_text().lower()
-    if any(token in release for token in ('id=almalinux', 'id=rocky', 'id=rhel', 'id=centos')):
+    release_values = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines() if '=' in line)
+    distro_id = release_values.get('ID', '').strip('"').lower()
+    if distro_id in ('almalinux', 'rocky', 'rhel', 'centos'):
         run('dnf', '-y', 'install', 'dnf-plugins-core', 'openssl', 'iproute')
         repo = 'https://download.docker.com/linux/centos/docker-ce.repo'
         if run('dnf', 'config-manager', '--add-repo', repo, capture=True, check=False).returncode:
             run('dnf', 'config-manager', 'addrepo', '--from-repofile', repo)
         run('dnf', '-y', 'install', 'docker-ce', 'docker-ce-cli', 'containerd.io',
             'docker-buildx-plugin', 'docker-compose-plugin')
-    elif any(token in release for token in ('id=ubuntu', 'id=debian')):
-        distro = 'ubuntu' if 'id=ubuntu' in release else 'debian'
+    elif distro_id in ('ubuntu', 'debian'):
+        distro = distro_id
         run('apt-get', 'update')
         run('apt-get', 'install', '-y', 'ca-certificates', 'curl', 'openssl', 'iproute2')
         keyring = Path('/etc/apt/keyrings')
