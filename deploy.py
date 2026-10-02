@@ -15,6 +15,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -267,6 +268,19 @@ def ensure_ui_war():
     finally:
         run('docker', 'rm', container)
 
+
+def prebuilt_cyrillic_ui_ready() -> bool:
+    war = ROOT / 'build' / 'archive-ui-cyrillic.war'
+    if not war.is_file() or war.stat().st_size <= 1_000_000:
+        return False
+    try:
+        with zipfile.ZipFile(war) as archive:
+            required = {'sr-Cyrl.json', 'sr-Cyrl/index.html',
+                        'sr-Cyrl/assets/schema/archiveDevice.schema.json'}
+            return required.issubset(archive.namelist()) and archive.testzip() is None
+    except zipfile.BadZipFile:
+        return False
+
 def wait_health(service: str, seconds: int):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -401,8 +415,11 @@ def main():
     ensure_ui_war()
     if not ENV.exists():
         if args.cyrillic_ui:
-            title('Compiling Serbian Cyrillic UI')
-            run(sys.executable, 'scripts/compile-cyrillic-ui.py')
+            if prebuilt_cyrillic_ui_ready():
+                print('Using the verified prebuilt Serbian Cyrillic UI WAR.', flush=True)
+            else:
+                title('Compiling Serbian Cyrillic UI')
+                run(sys.executable, 'scripts/compile-cyrillic-ui.py')
         active_war = ROOT / ('build/archive-ui-cyrillic.war' if args.cyrillic_ui else 'build/archive-ui.war')
     else:
         current = dict(line.split('=', 1) for line in ENV.read_text().splitlines() if '=' in line)

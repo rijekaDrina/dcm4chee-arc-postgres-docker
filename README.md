@@ -23,6 +23,8 @@ sudo python3 deploy.py --yes
 
 To create a named PACS administrator in addition to the built-in accounts, add `--pacs-admin-user NAME`. To replace another installation while keeping clients' existing trusted CA, add `--reuse-certs-from /path/to/old/stack`; the old certificate must cover the same hostname. Add `--cyrillic-ui` to build and enable **Srpski (latinica)** and **Српски (ћирилица)** in the UI picker. This first build downloads the matching upstream UI source and Node image and can take several minutes.
 
+On a host that cannot reach GitHub, place a verified `build/archive-ui-cyrillic.war` from the matching release in the project before running with `--cyrillic-ui`. The wizard validates the archive and uses it without downloading the UI source.
+
 If Docker is already installed but the machine has no internet, copy a `docker save` archive of the five pinned images to the server and run:
 
 ```sh
