@@ -421,8 +421,10 @@ def write_initial(host: str, ip: str, admin: str, pacs_admin: str, storage: str,
     secret_dir = ROOT / 'secrets'
     secret_dir.mkdir(mode=0o700, exist_ok=True)
     secret_dir.chmod(0o700)
+    data_root = ROOT / 'data'
+    data_entries = [path.name for path in data_root.iterdir()] if data_root.exists() else []
     if (ENV.exists() or ((ROOT / 'certs').exists() and any((ROOT / 'certs').iterdir()))
-            or ((ROOT / 'data').exists() and any((ROOT / 'data').iterdir()))):
+            or any(name != 'storage' for name in data_entries)):
         raise RuntimeError('Existing secrets or certificates found without a complete .env. Resolve this partial setup before continuing.')
     values = dict(PUBLIC_HOST=host, PUBLIC_BIND_IP=ip,
                   UI_WAR_PATH='./build/archive-ui-cyrillic.war' if cyrillic_ui else './build/archive-ui.war',
