@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import ipaddress
+import json
 import os
 import secrets
 import shutil
@@ -23,6 +24,8 @@ ENV = ROOT / '.env'
 PORTS = (8443, 8843, 9993, 11112, 2762, 2575, 12575)
 IMAGES = ('dcm4che/dcm4chee-arc-psql:5.35.1-secure', 'dcm4che/keycloak:25.0.6',
           'dcm4che/slapd-dcm4chee:2.6.13-35.1', 'dcm4che/postgres-dcm4chee:18.3-35', 'mariadb:10.11')
+DEFAULT_DOCKER_POOL_OCTETS = (*range(234, 255), *range(233, 0, -1))
+DOCKER_DEFAULT_RANGES = (ipaddress.ip_network('172.16.0.0/12'), ipaddress.ip_network('192.168.0.0/16'))
 
 
 def run(*args: str, capture: bool = False, check: bool = True, input_data: bytes | None = None):
@@ -49,6 +52,75 @@ def host_ipv4() -> str:
         if not fields[1].startswith(('docker', 'br-', 'veth', 'tun', 'wg', 'zt')):
             return fields[3].split('/')[0]
     raise RuntimeError('No suitable IPv4 address found. Pass --host-ip explicitly.')
+
+
+def host_lan_subnets() -> list[ipaddress.IPv4Network]:
+    """Global IPv4 subnets of the host, excluding virtual and Docker interfaces."""
+    subnets: list[ipaddress.IPv4Network] = []
+    addresses = run('ip', '-4', '-o', 'addr', 'show', 'scope', 'global', capture=True).stdout
+    for line in addresses.splitlines():
+        fields = line.split()
+        if not fields or fields[1].startswith(('docker', 'br-', 'veth', 'tun', 'wg', 'zt')):
+            continue
+        try:
+            subnets.append(ipaddress.ip_network(fields[3], strict=False))
+        except (IndexError, ValueError):
+            continue
+    return subnets
+
+
+def bip_for(base: ipaddress.IPv4Network) -> str:
+    """The last /24 inside the pool, reserved for the default docker0 bridge."""
+    last = int(base.network_address) + base.num_addresses - 256
+    return f'{ipaddress.ip_address(last + 1)}/24'
+
+
+def pick_docker_pool(explicit: str | None, lans: list[ipaddress.IPv4Network]) -> ipaddress.IPv4Network:
+    """Choose a /16 reserved for Docker that does not overlap any host LAN."""
+    if explicit:
+        candidates = [ipaddress.ip_network(explicit, strict=False)]
+        if candidates[0].version != 4 or candidates[0].prefixlen != 16:
+            raise RuntimeError('--docker-subnet must be an IPv4 /16, e.g. 10.234.0.0/16')
+    else:
+        candidates = (ipaddress.ip_network(f'10.{octet}.0.0/16') for octet in DEFAULT_DOCKER_POOL_OCTETS)
+    for base in candidates:
+        if not any(base.overlaps(lan) for lan in lans):
+            return base
+    raise RuntimeError('Candidate Docker subnets all overlap host LANs; pass --docker-subnet with a free /16.')
+
+
+def configure_docker_pools(base: ipaddress.IPv4Network, lans: list[ipaddress.IPv4Network]) -> None:
+    """Keep Docker networks on dedicated address space so they can never swallow host LAN traffic."""
+    desired = {'bip': bip_for(base), 'default-address-pools': [{'base': str(base), 'size': 24}]}
+    if any(lan.overlaps(range_) for lan in lans for range_ in DOCKER_DEFAULT_RANGES):
+        print(f'Host LAN subnets {[str(lan) for lan in lans]} fall inside Docker default pools '
+              f'(172.16.0.0/12, 192.168.0.0/16); dedicating {base} to Docker instead.', flush=True)
+    daemon = Path('/etc/docker/daemon.json')
+    config: dict = {}
+    if daemon.exists():
+        try:
+            config = json.loads(daemon.read_text() or '{}')
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f'{daemon} is not valid JSON ({error}); fix or remove it, then re-run deploy.py.') from error
+    if all(config.get(key) == value for key, value in desired.items()):
+        print(f'Docker address pools already set: {base}, bip {desired["bip"]}.', flush=True)
+    else:
+        config.update(desired)
+        daemon.write_text(json.dumps(config, indent=2) + '\n')
+        daemon.chmod(0o644)
+        print(f'Docker address pools set: {base}, bip {desired["bip"]}.', flush=True)
+        if run('systemctl', 'is-active', '--quiet', 'docker', check=False).returncode == 0:
+            run('systemctl', 'restart', 'docker')
+    # A network created before this setting keeps its old subnet; recreate the stack network when it sits on LAN space.
+    for name in run('docker', 'network', 'ls', '--format', '{{.Name}}', capture=True).stdout.split():
+        if name in ('host', 'none'):
+            continue
+        subnets = run('docker', 'network', 'inspect', '--format', '{{range .IPAM.Config}}{{.Subnet}} {{end}}',
+                      name, capture=True, check=False).stdout.split()
+        if any(lan.overlaps(ipaddress.ip_network(subnet, strict=False)) for subnet in subnets for lan in lans):
+            print(f'Docker network {name} uses host LAN space; recreating the stack network.', flush=True)
+            run('docker', 'compose', 'down')
+            break
 
 
 def memory_values() -> dict[str, str]:
@@ -393,6 +465,8 @@ def main():
     parser.add_argument('--cyrillic-ui', action='store_true',
                         help='compile and enable Serbian Cyrillic alongside Serbian Latin (requires Node image and time)')
     parser.add_argument('--images-archive', type=Path, help='offline docker save archive (.tar or .tar.gz)')
+    parser.add_argument('--docker-subnet',
+                        help='IPv4 /16 reserved for Docker networks (default: first 10.x.0.0/16 free of host LANs, e.g. 10.234.0.0/16)')
     parser.add_argument('--reconfigure-users', action='store_true', help='rotate initial PACS passwords again')
     args = parser.parse_args()
     if os.geteuid() and not args.dry_run:
@@ -426,12 +500,19 @@ def main():
         disk_plan = {key: current.get(key, value) for key, value in disk_plan.items()}
     print(f'RAM profile: {ram_plan}', flush=True)
     print(f'Storage profile: {disk_plan}', flush=True)
+    try:
+        pool = pick_docker_pool(args.docker_subnet, host_lan_subnets())
+        print(f'Docker address pool: {pool} (bip {bip_for(pool)})', flush=True)
+    except (RuntimeError, ValueError, OSError) as error:
+        print(f'Docker address pool: not determined ({error})', flush=True)
     if args.dry_run:
         print('Dry run complete. No files or containers were changed.', flush=True)
         return
     title('Prerequisites and images')
     ensure_tools()
     docker_waits_for_data_mounts()
+    lan_subnets = host_lan_subnets()
+    configure_docker_pools(pick_docker_pool(args.docker_subnet, lan_subnets), lan_subnets)
     if not ENV.exists():
         check_ports(ip)
     if args.images_archive:

@@ -66,6 +66,27 @@ The secure UI includes the upstream Serbian Latin translation. The installer ena
 
 The wizard publishes ports on the chosen host IPv4 address. Client computers still need a route and firewall permission to reach that address. If you use a DNS name with `--host`, it must resolve to the same host on both the server and every browser client. Using the IP address is simplest for a test deployment.
 
+### Docker address pools
+
+Docker's default address pools cover 172.16.0.0/12 and 192.168.0.0/16 — ranges many hospital networks use for their own subnets. When a Docker network lands on the same range as the LAN, the server treats that range as directly connected and answers LAN clients through the Docker bridge instead of the gateway: from the moment Docker starts, clients can no longer reach the server, and the OIDC redirects fail with it.
+
+The wizard prevents this on every deployment: it picks a /16 free of host LAN overlaps (default `10.234.0.0/16`, then the next free 10.x range, or `--docker-subnet` to choose explicitly), writes it to `/etc/docker/daemon.json` as `default-address-pools` plus a `bip` for the default bridge, and restarts Docker when the configuration changed. If an existing compose network still sits on LAN space, it is recreated with the dedicated pool. On a machine deployed before this setting, the same repair by hand:
+
+```sh
+cd /srv/dcm4chee/dcm4chee-arc-postgres-docker
+sudo docker compose down
+sudo tee /etc/docker/daemon.json >/dev/null <<'EOF'
+{
+  "bip": "10.234.255.1/24",
+  "default-address-pools": [{ "base": "10.234.0.0/16", "size": 24 }]
+}
+EOF
+sudo systemctl restart docker
+sudo docker compose up -d
+```
+
+Use a range that is free in the local network plan; only Docker routes inside it.
+
 Open 8443 and 8843 to intended browser clients. Limit 9993 to administrators. Open 11112 or 2762 only to authorized DICOM clients. Open HL7 ports 2575 and 12575 only where needed. Do not expose this test stack directly to the public internet.
 
 ## Daily operations
@@ -86,6 +107,7 @@ See the detailed [manual installation guide in Serbian](docs/RUCNO-UPUTSTVO.md) 
 
 The wizard uses [compose.yaml](compose.yaml) and the scripts under [scripts](scripts). To operate manually, install Docker Engine and its Compose plugin, generate unique values for every secret in `.env.example`, create an HTTPS certificate with an IP or DNS SAN, export `arc.p12`, `keycloak.p12` and `ca.p12`, then run `docker compose up -d`. Once all services are healthy, run `python3 scripts/configure-users.py` and `python3 scripts/apply-ldap-config.py`, restart ARC, and verify login, QIDO and C-ECHO. The wizard performs these steps and is the recommended first install route.
 
+- Server unreachable from LAN clients since Docker was installed: a Docker network or the default bridge overlaps the LAN subnet. On the server check `ip route get <LAN-client-IP>` — it must leave through the LAN interface, not through `br-…` or `docker0`. Apply the address pool repair from "Network access".
 - `Invalid parameter: redirect_uri`: use the same host string entered in the wizard, and check client `dcm4chee-arc-ui` in Keycloak.
 - Many 401 errors or no logout: check the `account` client roles `view-profile` and `manage-account` for the PACS user. `configure-users.py` assigns them to the initial accounts and rotates passwords if run again.
 - No studies found: choose web application service `DCM4CHEE` on the Studies page and submit. An empty new archive should return no studies.
