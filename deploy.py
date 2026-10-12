@@ -470,6 +470,8 @@ def main():
     parser.add_argument('--docker-subnet',
                         help='IPv4 /16 reserved for Docker networks (default: first 10.x.0.0/16 free of host LANs, e.g. 10.234.0.0/16)')
     parser.add_argument('--reconfigure-users', action='store_true', help='rotate initial PACS passwords again')
+    parser.add_argument('--enable-ldap-backup', action='store_true',
+                        help='install daily private LDAP LDIF exports with a systemd timer')
     args = parser.parse_args()
     if os.geteuid() and not args.dry_run:
         raise RuntimeError('Run as root: sudo python3 deploy.py')
@@ -574,6 +576,10 @@ Test DICOM TLS identity: {ROOT}/secrets/test-client.p12
 Passwords: {ROOT}/secrets/INITIAL_CREDENTIALS.txt (mode 600)
 Data: {ROOT}/data (keep this folder on the intended storage disk)
 ''', flush=True)
+    if args.enable_ldap_backup:
+        title('Daily LDAP LDIF backup')
+        run(sys.executable, 'scripts/backup-ldap.py')
+        run(sys.executable, 'scripts/install-ldap-backup-timer.py')
 
 
 if __name__ == '__main__':
