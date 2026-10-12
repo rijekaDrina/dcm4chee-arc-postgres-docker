@@ -101,6 +101,23 @@ sudo docker compose exec db psql -U pacs -d pacsdb
 
 `docker compose down` preserves data under `data/`. Do not use `down -v` or delete `data/` unless you intend to erase the installation. Back up the entire `data/` directory together with `.env`, `certs/`, `secrets/` and `compose.yaml`. Verify that a backup can be restored before using real studies.
 
+LDAP connection, operation and result logs are enabled with `LDAP_DEBUG=256`
+(`stats`) and can be viewed with `sudo docker compose logs --since=1h ldap` or
+in Portainer's LDAP container Logs tab. Docker rotates them at 10 MB per file,
+three files. LDIF exports below are database backups, not activity logs.
+
+For a portable LDAP export, run `sudo python3 scripts/backup-ldap.py`. It writes
+`config.ldif` and `directory.ldif` plus a SHA-256 manifest under `../ldap-backups/`,
+with root-only permissions, and retains the newest 14 successful exports. To run it
+daily, use `sudo python3 scripts/install-ldap-backup-timer.py`, or pass
+`--enable-ldap-backup` to the installation wizard. Check runs with
+`systemctl status dcm4chee-ldap-backup.timer` and
+`journalctl -u dcm4chee-ldap-backup.service`. LDAP exports include account data
+and password hashes: keep them private and copy them off the server. The LDIF
+files cover LDAP only; a full PACS recovery also needs the other databases,
+study files, `.env`, certificates and secrets. Restore LDIF into an isolated
+test installation first; never import it into a live directory without a plan.
+
 See the detailed [manual installation guide in Serbian](docs/RUCNO-UPUTSTVO.md) for every command used by the wizard.
 
 ## Manual setup and troubleshooting

@@ -143,3 +143,20 @@ docker compose down
 ```
 
 `down` čuva datoteke u `data/`; ne koristi `down -v` i ne briši `data/` ako studije treba da ostanu. Za backup sačuvaj `data/`, `.env`, `certs/`, `secrets/` i `compose.yaml` zajedno, van servera, uz ograničen pristup. Proveri vraćanje na odvojenoj testnoj instalaciji pre rada sa stvarnim studijama.
+
+LDAP aktivnost se vidi u `docker compose logs --since=1h ldap` ili u
+Portainerovoj kartici **Logs** za LDAP kontejner. Nivo `stats` (`LDAP_DEBUG=256`)
+bilježi veze, LDAP operacije i rezultate; Docker zadržava tri log datoteke od
+po 10 MB. To nisu LDIF backupi podataka opisani ispod.
+
+Za čitljiv LDAP backup u LDIF formatu pokreni `sudo python3 scripts/backup-ldap.py`.
+Skripta čuva `config.ldif`, `directory.ldif` i manifest sa SHA-256 kontrolnim
+sumama u `../ldap-backups/`, dostupno samo root korisniku. Zadržava posljednjih
+14 uspješnih izvoza. Dnevni raspored uključi naredbom
+`sudo python3 scripts/install-ldap-backup-timer.py` ili opcijom
+`--enable-ldap-backup` pri pokretanju wizarda. Rezultat provjeri sa
+`systemctl status dcm4chee-ldap-backup.timer` i
+`journalctl -u dcm4chee-ldap-backup.service`. LDIF sadrži korisničke podatke i
+hashove lozinki: čuvaj ga na zaštićenoj lokaciji i kopiraj van servera.
+Samo LDAP LDIF nije dovoljan za vraćanje cijelog PACS-a; sačuvaj i ostale baze,
+snimke, `.env`, certifikate i `secrets/`. Obnovu prvo uvježbaj na odvojenoj mašini.
